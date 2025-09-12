@@ -1,0 +1,46 @@
+{
+  "name": "eq-zone-tray-appscript",
+  "version": "1.1.1",
+  "private": true,
+  "description": "Electron tray app that watches EverQuest logs and upserts zones/inventories into Google Sheets via Apps Script.",
+  "author": "Tyler A",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "dist": "electron-builder -w",
+    "pack": "electron-builder --dir"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.eq.zone.tray",
+    "productName": "EQ Zone Watcher",
+    "files": [
+      "main.js",
+      "lib/**",
+      "assets/**",
+      ".env",
+      ".env.example",
+      ".env.production",
+      "README.md",
+      "Code.gs",
+      "defaults/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/app-icon.ico"
+    },
+    "mac": {
+      "category": "public.app-category.utilities"
+    }
+  }
+}
