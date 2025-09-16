@@ -1,0 +1,19 @@
+name = "eq-zone-proxy"
+main = "src/index.js"
+compatibility_date = "2025-09-15"
+
+[vars]
+DIAG_DEFAULT = "0" # diagnostics off by default
+
+[[kv_namespaces]]
+binding = "ZONEQ"
+id = "d261122b857c4d77ac3d69d36e37798f"
+preview_id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[[kv_namespaces]]
+binding = "CFG"
+id = "dc9667bb87a147daafdcaf24309ab5d4"
+preview_id = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+
+[triggers]
+crons = ["*/2 * * * *"] # retry queue every 2 minutes

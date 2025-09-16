@@ -1,163 +1,279 @@
-# EQ Zone Watcher (Tray App + Apps Script)
+# EQ Zone Watcher
 
-A tiny Electron tray app that watches your EverQuest log files and keeps a Google Sheet up to date with:
+Electron tray app that watches EverQuest log files and updates a Google Sheet via a tiny backend.
+Works great across **multiple PCs / time zones**: log timestamps are normalized to **UTC**; Google Sheets renders dates in the **sheet’s time zone**.
 
-- your **current zone per character** (updated on change, with UTC timestamps)
-- optional **inventory tables** (sent immediately on demand)
-
-It talks to a small **Google Apps Script** that does the actual upsert into your sheet.
+▶️ **Demo video:** [EQ Zone Watcher in action](https://www.youtube.com/watch?v=RXnYiDdamkg)
 
 ---
 
-## Highlights
+## Features
 
-- **Initial Scan**: scan all `eqlog_*.txt` and push once.
-- **Periodic scan** (default every 60–120s): picks up new zone changes and pushes deltas.
-- **Inventory send**: one click per character (`*-Inventory.txt`) → Sheet tab `Inventory - <Character>`.
-- **UTC timestamps** in `YYYY-MM-DD HH:mm:ss` format.
-- **Resilient parser**: tail + fallback full read, matches `You have entered <Zone>.` and timestamps like `[Fri Sep 12 10:23:45 2025]`.
-- **Diagnostics**: ping your Apps Script, run a cycle, view status, open the log folder.
-- **Safe queueing**: new deltas aren’t dropped if they arrive during a send.
-- **Log rotation**: cap file size and keep a few rotated copies.
+* 🖥️ **Windows tray** app (Electron)
+* 🔎 Scans `eqlog_*.txt` and finds the **latest** “You have entered …” per log file
+* 📤 Upserts **latest per character** to a “Zone Tracker” tab in your Google Sheet
+* 📦 Optionally sends `*-Inventory.txt` into an “Inventory - <Char>” tab
+* 🔁 **Initial Scan** + optional **Periodic scan** (scan + send)
+* 🗂️ JSON tools: export local state; import a saved JSON (direct or RAW staging)
+* 🧩 Tiny backend:
+
+  * **Option A (recommended):** Cloudflare Worker **proxy →** Apps Script
+  * **Option B:** Direct **Apps Script /exec** (no proxy)
 
 ---
 
-## How it works (quick)
+## Folder Layout
 
-1. The tray app watches your EQ logs directory for files named like `eqlog_<Character>_*.txt`.
-2. On a zone change, it enqueues a delta and POSTs a JSON blob to your Apps Script `/exec`.
-3. The Apps Script writes/updates rows in your **Zone Tracker** tab keyed by **Log File**.
-4. Inventory sends push `*-Inventory.txt` TSV content into `Inventory - <Character>` tabs.
+```
+repo/
+├─ main.js                     # Electron app entry (tray, watcher, sender)
+├─ Code.gs                     # Apps Script backend (sheet importer)
+├─ package.json
+├─ .env.example                # sample dev env
+├─ .env                        # (dev only) local overrides
+├─ .env.production             # packaged build defaults
+├─ defaults/
+│  └─ config.json              # safe seed config (scan interval, tab name)
+├─ lib/
+│  ├─ date.js                  # UTC formatting & helpers
+│  ├─ parser.js                # log tail + zone extraction
+│  ├─ inventory.js             # inventory TSV reader + file dates
+│  └─ sheets.js                # POST helper (client-side)
+├─ assets/
+│  ├─ app-icon.ico             # ≥256x256 for Windows builds
+│  ├─ tray-dark.png
+│  └─ tray-light.png
+└─ eq-zone-worker/             # (optional) Cloudflare Worker proxy
+   ├─ wrangler.toml
+   ├─ package.json
+   ├─ README.md
+   └─ src/index.js
+```
 
 ---
 
 ## Requirements
 
-- **Windows 10/11** (macOS/Linux builds possible with electron-builder)
-- **Node 20+**
-- **Google Account**
-- A Google Sheet you own (or can edit)
+* Windows 10+ (macOS/Linux should work with minor tweaks)
+* Node.js 18+ (recommended 20+)
+* A Google account with access to the target Sheet
 
 ---
 
-## Setup — Apps Script (from Google Sheets)
+## Pick your backend
 
-1) **Create a new Google Sheet**  
-   - Google Drive → **New → Google Sheets**.  
-   - (Optional) Rename it (e.g., “EQ Zone Tracker”).  
-   - Copy the **Sheet ID** (between `/d/` and `/edit` in the URL).
+You can run **either** through a **Cloudflare Worker** proxy (recommended) **or** directly to **Apps Script /exec**.
 
-2) **Open Apps Script from the Sheet**  
-   - Sheet menu → **Extensions → Apps Script**.  
-   - Delete placeholder code and **paste** the contents of `Code.gs` from this repo.
+### Option A (recommended): Cloudflare Worker → Apps Script
 
-3) **(Optional) Script Properties**  
-   Apps Script → **Project Settings (gear) → Script properties → + Add script property**  
-   - `SHEET_ID` → your Sheet ID (lets the script default to this Sheet)  
-   - `SHARED_SECRET` → any string you’ll also enter in the tray app (blocks unauthorized posts)  
-   - `DEFAULT_ZONE_TAB` → e.g., `Zone Tracker`
+**Why:** stable URL for distribution, hide your Apps Script secret, edge queue/retry on 429/5xx.
 
-   > If you don’t set `SHEET_ID` here, you can provide it from the tray app’s **Settings** instead.
+1. Go to `eq-zone-worker/` and follow its README:
 
-4) **Deploy the Web App**  
-   - **Deploy → Manage deployments → New deployment**  
-   - **Select type:** *Web app*  
-   - **Execute as:** **Me**  
-   - **Who has access:** **Anyone with the link**  
-   - **Deploy**, then **copy the Web app URL** (must end with `/exec`).
+   * `wrangler kv namespace create ZONEQ` and `CFG`
+   * `wrangler secret put APPS_SCRIPT_URL` (your Apps Script `/exec`)
+   * (Optional) `wrangler secret put SCRIPT_SECRET`, `CLIENT_SECRET`, `ADMIN_TOKEN`
+   * `wrangler deploy`
+2. You’ll get a URL like:
 
-   > To keep the same `/exec` URL in the future, **edit the existing deployment** (Manage deployments → select it → **Edit** → **New version** → **Deploy**). Creating a *new* deployment generates a *new* URL.
+   ```
+   https://eq-zone-proxy.<your-subdomain>.workers.dev
+   ```
+3. Use **that Worker URL** in the Electron app (see “Configure the app” below).
 
-5) **Connect the Tray App**  
-   - Open the app → **Settings**:  
-     - **Apps Script URL:** paste the `/exec` URL you copied  
-     - **Shared Secret:** paste the same string you used in `SHARED_SECRET` (if set)  
-     - **Google Sheet ID:** paste the Sheet ID (skip if you set `SHEET_ID` in Script Properties)  
-     - **EQ Logs Folder** (and optional **Base Folder** for inventories)
-   - Use **Diagnostics → Ping Apps Script** to confirm a JSON `ok:true` response.
-
-6) **First send**  
-   - Click **Initial Scan** in the tray menu to seed the **Zone Tracker** tab.  
-   - Periodic scans will send deltas whenever you zone in-game.
+> You can check Worker status at `GET /diag`. If you enabled the admin token, toggle logs with `POST /diag?on=1|off=1` + `X-Admin`.
 
 ---
 
-## Running
+### Option B: Direct Apps Script
+
+1. **Create your Sheet** (or open an existing one), then in that Sheet go to
+   **Extensions → Apps Script** (this auto-binds the script to your Sheet).
+2. Replace the default script with the contents of **`Code.gs`** (from this repo).
+3. Click **Deploy → Manage deployments → New deployment → Web app**:
+
+   * **Execute as:** *Me*
+   * **Who has access:** *Anyone with the link* (or your account if only you post)
+   * **Deploy** and copy the **Web app URL** (`…/exec`).
+4. (Optional) **Script properties** (Project settings → Script properties):
+
+   * `SHEET_ID` – spreadsheet ID (if you want the script to know it)
+   * `SHARED_SECRET` – a token your app (or Worker) will send in `X-Auth`
+   * `DEFAULT_ZONE_TAB` – default tab name (default: `Zone Tracker`)
+5. In the **Google Sheet**: File → **Settings** → set the Sheet **Time zone**.
+
+> The script writes **Date cells**; Sheets handles display in the Sheet’s time zone.
+
+---
+
+## Configure the Electron app
+
+1. Install deps:
+
+   ```bash
+   npm install
+   ```
+2. Dev settings: copy `.env.example` → `.env`, then set at least:
+
+   ```ini
+   # Use the Worker URL (Option A), or your Apps Script /exec (Option B)
+   APPS_SCRIPT_URL=https://eq-zone-proxy.<subdomain>.workers.dev
+   # If your Worker requires X-Auth:
+   APPS_SCRIPT_SECRET=your-worker-client-secret
+   # If calling Apps Script directly and you set SHARED_SECRET there:
+   # APPS_SCRIPT_SECRET=the-same-secret
+
+   EQ_LOG_DIR=C:\Path\To\EverQuest\Logs   # folder with eqlog_*.txt
+   EQ_BASE_DIR=C:\Path\To\EverQuest       # (optional) for *-Inventory.txt
+   EQ_SHEET_ID=                           # optional if stored as a Script property
+   EQ_SHEET_TAB=Zone Tracker
+   SCAN_INTERVAL_SECS=60
+   ```
+
+   *Tip:* In production builds, `.env.production` provides packaged defaults (users can still change these via **Settings**).
+3. Run:
+
+   ```bash
+   npm run dev
+   ```
+
+> The app persists user overrides in `%APPDATA%/EQ Zone Watcher/config.json`.
+> You can also edit everything later from the tray **Settings** menu.
+
+---
+
+## Using the Tray Menu
+
+* **Initial Scan** – Full scan of `eqlog_*.txt` and send once.
+* **Periodic scan (scan + send)** – Toggle on/off; pick 30/60/120/300s.
+* **Create JSON (save locally)…** – Export current “latest per log”.
+* **Send JSON to Google Sheet…**
+
+  * **Store & Import** – Import immediately.
+  * **Store RAW only** – Save to `RAW!A1`; import later from the Sheet menu.
+* **Inventories → Send Inventory: <Char>** – Push a character’s `*-Inventory.txt`.
+* **Settings**
+
+  * Set Apps Script URL / Shared Secret / Sheet ID
+  * Set EQ Base Folder… / Set EQ Logs Folder…
+* **Open Sheet** – Opens spreadsheet if `EQ_SHEET_ID` is set.
+* **Quit**
+
+---
+
+## Sheet schema
+
+**Zone Tracker** (default tab “Zone Tracker”):
+
+| A              | B        | C         | D (Date)           | E (Date)           |
+| -------------- | -------- | --------- | ------------------ | ------------------ |
+| Character Name | Log File | Zone Name | Detected Timestamp | Last Updated (UTC) |
+
+* **Key:** `Log File` (one row per log file).
+* **Upsert rule:** updates when the incoming timestamp is **newer** (UTC) or blank.
+* Dates are stored as **real Date cells**.
+
+**Inventory - *Character*** tabs:
+
+* Row1: `Inventory for | File | Created On | Modified On`
+* Row2: values (plus filename)
+* Row4+: TSV rows from `*-Inventory.txt`
+
+---
+
+## Time & Time-zones
+
+* Log timestamps are normalized to **UTC** before sending.
+* Apps Script writes **Date** values; Sheets renders them in the **Sheet’s** time zone (File → Settings).
+* Multiple PCs/time zones won’t conflict—the **newest absolute timestamp wins**.
+
+---
+
+## Build (Windows)
 
 ```bash
-npm install
-npm run dev   # runs the tray app
-# npm run pack  # directory build
-# npm run dist  # Windows installer
+npm run dist
 ```
 
-**Tray menu** (key items):
-
-- **Initial Scan** – scan all logs and push once.
-- **Inventories** – per-character send of inventory TSV.
-- **Periodic scan (scan + send)** – toggle.
-- **Scan interval** – 30 / 60 / 120 / 300 seconds.
-- **Diagnostics**:
-  - **Show status** – queue size, last runs, paths.
-  - **Run periodic cycle now**
-  - **Ping Apps Script**
-  - **Open log file folder**
-- **Settings** – set URLs/IDs/folders at any time.
-
-> Note: “Send ALL zones now (force)” and “Reset zone state (local)” were removed by request.
-
----
-
-## Packaging (Windows)
-
-- **App icon**: `assets/app-icon.ico`  
-- **Tray icons**: `assets/tray-dark.png`, `assets/tray-light.png`
-
-If 7-Zip fails with a symlink privilege error during code-sign tool extraction:
-- Enable **Developer Mode** (Windows → For developers → Developer Mode), or
-- Build from an **elevated PowerShell** (Run as administrator), then
-- Delete `C:\Users\<you>\AppData\Local\electron-builder\Cache\winCodeSign` and retry.
-
----
-
-## Configuration
-
-At startup, the app loads (highest to lowest precedence):
-1. Saved **Settings** (`config.json` in Electron **userData**)
-2. Packaged defaults (if you include `defaults/config.json`)
-3. `.env` / `.env.production` (mainly for development)
-
-Common environment variables:
-```
-APPS_SCRIPT_URL=...
-APPS_SCRIPT_SECRET=...
-EQ_SHEET_ID=...
-EQ_LOG_DIR=C:\...\EverQuest\Logs
-EQ_BASE_DIR=C:\...\EverQuest
-EQ_SHEET_TAB=Zone Tracker
-SCAN_INTERVAL_SECS=60
-LOG_MAX_BYTES=5242880
-LOG_MAX_FILES=3
-LOG_COMPRESS=0
-```
+Creates an NSIS installer in `dist/`.
+Make sure `assets/app-icon.ico` is ≥256×256 (already included).
 
 ---
 
 ## Troubleshooting
 
-**Ping returns HTML (not JSON)**  
-- You’re hitting the wrong deployment or the script threw: ensure **/exec** URL, **Execute as: Me**, **Anyone with the link**, and that the script owner has **edit** access to the Sheet.
+* **Needs URL** – Set the URL in `.env` or from **Settings → Set Apps Script URL**.
+  With Worker: use the **Worker URL**. With direct Apps Script: use the `/exec` URL.
+* **403 unauthorized**
 
-**No periodic updates**  
-- Verify EQ logs folder path and that lines contain “You have entered …”
-- Check Diagnostics → Show status
-- Ensure Apps Script returns JSON `{ ok:true }`; if errors, they come back as JSON with `error`.
+  * Worker path: set `CLIENT_SECRET` in the Worker; put the same value into the app (**Shared Secret**).
+  * Direct Apps Script: if you set `SHARED_SECRET` in Script Properties, the app must send it.
+* **429 Too Many Requests**
 
-**429 rate limit**  
-- Increase scan interval (120–300s recommended).
+  * If using direct Apps Script, increase interval (e.g., 120–300s).
+  * With Worker, spikes are **queued** and retried on a cron.
+* **Nothing updates**
+
+  * Verify `EQ_LOG_DIR` path and that files match `eqlog_*.txt`.
+  * Try **Initial Scan** to seed rows.
+  * Check the app console (dev) or your Worker logs: `wrangler tail`.
+* **Worker `/diag` shows missing vars**
+
+  * Production deploys don’t read `.env`. Set secrets with:
+
+    ```
+    wrangler secret put APPS_SCRIPT_URL
+    wrangler deploy
+    ```
+* **Times look off**
+
+  * Change the **Sheet’s time zone** (File → Settings). Stored values are true Date cells.
+
+---
+
+## Environment variables (Electron)
+
+| Name                 | Purpose                                  |
+| -------------------- | ---------------------------------------- |
+| `APPS_SCRIPT_URL`    | Worker URL (Option A) or `/exec` URL (B) |
+| `APPS_SCRIPT_SECRET` | Optional `X-Auth` the app sends          |
+| `EQ_SHEET_ID`        | Target spreadsheet ID (optional)         |
+| `EQ_SHEET_TAB`       | Zone tab name (default: `Zone Tracker`)  |
+| `EQ_LOG_DIR`         | Folder containing `eqlog_*.txt`          |
+| `EQ_BASE_DIR`        | Folder with `*-Inventory.txt` (optional) |
+| `SCAN_INTERVAL_SECS` | Periodic scan interval (0 disables)      |
+
+---
+
+## Data & Privacy
+
+The app reads local text files and sends:
+
+* The **latest zone per log file** (and timestamps), and
+* Optional **inventory TSV** for selected characters
+  to your configured backend (Worker or Apps Script).
+  No analytics, no third-party logging.
 
 ---
 
 ## License
 
-MIT
+MIT — enjoy!
+
+---
+
+## FAQ
+
+**Do I need Google Cloud APIs?**
+No. The backend is **Apps Script** (or a Worker proxy to it). The script writes to Sheets directly.
+
+**Multiple computers—who wins?**
+The one with the **newer** UTC timestamp. Time zone doesn’t matter.
+
+**Can I omit `EQ_SHEET_ID`?**
+Yes. Store it as a Script Property (`SHEET_ID`) and the app can leave it blank.
+
+**What URL do I paste into the app?**
+
+* With **Worker**: paste the **Worker URL** (the Worker forwards to Apps Script).
+* With **direct** setup: paste the **Apps Script `/exec`** URL.
